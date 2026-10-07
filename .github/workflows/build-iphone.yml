@@ -1,0 +1,28 @@
+name: Build Apex Speed for iPhone
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract project
+        run: unzip -q ApexSpeed.zip -d source
+      - name: Test speed calculations
+        working-directory: source/ApexSpeed
+        run: swift test
+      - name: Build iPhone app
+        working-directory: source/ApexSpeed
+        run: bash Scripts/build-ipa.sh
+      - name: Downloadable iPhone app
+        uses: actions/upload-artifact@v4
+        with:
+          name: ApexSpeed-unsigned
+          path: source/ApexSpeed/build/ApexSpeed-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 7
