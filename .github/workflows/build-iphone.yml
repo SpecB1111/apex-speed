@@ -1,28 +1,106 @@
-name: Build Apex Speed for iPhone
+name: Build and publish VORIX Ride
+
 on:
   workflow_dispatch:
   push:
     branches: [main]
+    paths:
+      - ApexSpeed.zip
+      - .github/workflows/build-iphone.yml
+
 permissions:
   contents: read
+
+concurrency:
+  group: vorix-iphone-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: macos-15
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Extract project
         run: unzip -q ApexSpeed.zip -d source
-      - name: Test speed calculations
+      - name: Test speed and lean calculations
         working-directory: source/ApexSpeed
         run: swift test
       - name: Build iPhone app
         working-directory: source/ApexSpeed
         run: bash Scripts/build-ipa.sh
-      - name: Downloadable iPhone app
+      - name: Save tested installer
         uses: actions/upload-artifact@v4
         with:
-          name: ApexSpeed-unsigned
+          name: VORIX-Ride
           path: source/ApexSpeed/build/ApexSpeed-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
+
+  publish:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: VORIX-Ride
+          path: installer
+      - name: Update the permanent app download
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          BUILD_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! git diff --quiet "$SOURCE_SHA" HEAD -- ApexSpeed.zip .github/workflows/build-iphone.yml; then
+            echo "Newer source exists; leaving its installer untouched."
+            exit 0
+          fi
+          cp installer/ApexSpeed-unsigned.ipa VORIX-Ride.ipa
+          python3 - <<'PY'
+          import hashlib, json, os, plistlib, zipfile
+          from pathlib import Path
+          path = Path('VORIX-Ride.ipa')
+          with zipfile.ZipFile(path) as archive:
+              assert archive.testzip() is None
+              info = plistlib.loads(archive.read('Payload/ApexSpeed.app/Info.plist'))
+              assert 'Payload/ApexSpeed.app/PlugIns/ApexSpeedWidget.appex/ApexSpeedWidget' in archive.namelist()
+          metadata = {'version': info['CFBundleShortVersionString'], 'build': info['CFBundleVersion'],
+                      'source_commit': os.environ['SOURCE_SHA'], 'workflow_run': os.environ['BUILD_URL'],
+                      'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'signing': 'Install with AltStore'}
+          Path('BUILD-INFO.json').write_text(json.dumps(metadata, indent=2) + '\n')
+          PY
+          if [ ! -f README.md ]; then
+            cat > README.md <<'EOF'
+          # VØRIX Ride for iPhone
+
+          ## Download the app
+
+          **[Download VORIX-Ride.ipa](https://github.com/SpecB1111/apex-speed/raw/refs/heads/main/VORIX-Ride.ipa)**
+
+          This link always points to the latest successfully built app in this repository. Failed builds leave the previous installer available. See BUILD-INFO.json for its version and build details.
+
+          Save the IPA to Files on your iPhone. Keep AltServer running on your Windows PC, then open AltStore → My Apps → + and select the IPA. Choose **Keep App Extensions** for Dynamic Island. Install over the existing app using the same Apple Account; do not delete it first if you want to keep your history.
+
+          Features include GPS speed, automatic signal-quality adjustment, Dynamic Island, acceleration estimates, session history, and calibrated estimated phone lean. Calibrate while parked with the bike upright and the phone securely mounted. Lean readings run while the app is open and are not certified motorcycle lean measurements.
+
+          ## Updates
+
+          The Xcode source project is in ApexSpeed.zip. Updating that archive on main automatically runs the Swift tests, builds the app and extension on a hosted Mac, then replaces VORIX-Ride.ipa here. You still install each update through AltStore; the installed app does not update itself.
+          EOF
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- VORIX-Ride.ipa BUILD-INFO.json README.md
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Update VORIX Ride installer"
+          git push origin HEAD:main
